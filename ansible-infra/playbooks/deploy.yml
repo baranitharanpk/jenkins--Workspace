@@ -33,13 +33,14 @@
         state: started
       tags: ['setup']
 
-    # ---------- Backup (no wildcard, no deprecation) ----------
+    # ---------- Backup ----------
     - name: Find existing website files (any type)
       ansible.builtin.find:
         paths: "{{ web_dest_path }}"
         file_type: any
         hidden: yes
       register: web_files
+      ignore_errors: yes
       tags: ['backup']
 
     - name: Create backup ONLY if files exist
@@ -48,10 +49,11 @@
         path: "{{ web_files.files | map(attribute='path') | list }}"
         dest: "/tmp/website_backup_{{ ansible_facts.date_time.epoch }}.tar.gz"
         format: gz
+      ignore_errors: yes
       tags: ['backup']
     # ---------- /Backup ----------
 
-    # ---------- Cleanup (idempotent) ----------
+    # ---------- Cleanup ----------
     - name: Remove website directory completely
       ansible.builtin.file:
         path: "{{ web_dest_path }}"
@@ -68,25 +70,18 @@
       tags: ['cleanup']
     # ---------- /Cleanup ----------
 
-    # ---------- Content sync from Jenkins controller ----------
-    # Runs on localhost (Jenkins) without sudo; pushes with rsync to remote.
+    # ---------- Content Copy (FIXED) ----------
+    # OPTION 1: Use copy module instead of synchronize (more reliable)
     - name: Copy website files from web-app repository
-      become: false
-      delegate_to: localhost
-      ansible.builtin.synchronize:
+      ansible.builtin.copy:
         src: "{{ web_source_path }}/"
         dest: "{{ web_dest_path }}/"
-        delete: no
-        recursive: yes
-        rsync_opts:
-          - "--exclude=.git"
-          - "--exclude=.gitignore"
-          - "--exclude=README.md"
+        owner: "{{ web_user }}"
+        group: "{{ web_group }}"
+        mode: preserve
+        remote_src: no
       tags: ['deploy']
-      # If /var/www/html must be root-owned and not writable by remote user,
-      # uncomment next line and ensure passwordless sudo for the remote user:
-      # rsync_path: "sudo rsync"
-    # ---------- /Content sync ----------
+    # ---------- /Content Copy ----------
 
     - name: Set proper ownership on website files
       ansible.builtin.file:
