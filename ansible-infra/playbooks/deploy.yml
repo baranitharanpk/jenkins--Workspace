@@ -1,47 +1,70 @@
 ---
 - name: Deploy static website to web servers
-  hosts: webservers                              
+  hosts: webservers
   become: yes
-  gather_facts: yes                               
+  gather_facts: yes
 
   vars:
     # Path relative to Jenkinsfile workspace
-    web_source_path: "{{ playbook_dir }}/../../web-app"  
+    web_source_path: "{{ playbook_dir }}/../../web-app"
     web_dest_path: "/var/www/html"
     web_user: "www-data"
     web_group: "www-data"
 
   tasks:
-    - name: Ensure Apache is installed          
+    - name: Ensure Apache is installed
       ansible.builtin.apt:
         name: apache2
         state: present
         update_cache: yes
       tags: ['setup']
 
-    - name: Ensure Apache is enabled and started  
+    - name: Ensure Apache is enabled and started
       ansible.builtin.service:
         name: apache2
         enabled: yes
         state: started
       tags: ['setup']
 
-    - name: Create backup of existing website     
-      ansible.builtin.archive:
-        path: "{{ web_dest_path }}/*"
-        dest: "/tmp/website_backup_{{ ansible_date_time.epoch }}.tar.gz"
-        format: gz
-      ignore_errors: yes
+    # ---------- Backup (fixed) ----------
+    # Find existing content explicitly, then archive that list only if it exists.
+    - name: Find existing website files (any type)
+      ansible.builtin.find:
+        paths: "{{ web_dest_path }}"
+        file_type: any
+        hidden: yes
+      register: web_files
       tags: ['backup']
 
-    - name: Remove old website files (except Apache defaults)
-      ansible.builtin.shell: |
-        find {{ web_dest_path }} -mindepth 1 -not -name 'index.html' -not -name '.htaccess' -delete
-      args:
-        warn: false
+    - name: Create backup ONLY if files exist
+      when: web_files.matched | int > 0
+      ansible.builtin.archive:
+        path: "{{ web_files.files | map(attribute='path') | list }}"
+        dest: "/tmp/website_backup_{{ ansible_facts.date_time.epoch }}.tar.gz"
+        format: gz
+      tags: ['backup']
+    # ---------- /Backup ----------
+
+    # ---------- Cleanup (idempotent) ----------
+    # Option A: Remove everything, then recreate the directory (safest and simplest)
+    - name: Remove website directory completely
+      ansible.builtin.file:
+        path: "{{ web_dest_path }}"
+        state: absent
       tags: ['cleanup']
 
-    - name: Copy website files from web-app repository  
+    - name: Recreate website directory
+      ansible.builtin.file:
+        path: "{{ web_dest_path }}"
+        state: directory
+        owner: "{{ web_user }}"
+        group: "{{ web_group }}"
+        mode: '0755'
+      tags: ['cleanup']
+    # If you must keep the default Apache index.html, use find+file instead of the two tasks above.
+    # ---------- /Cleanup ----------
+
+    - name: Copy website files from web-app repository
       ansible.builtin.synchronize:
         src: "{{ web_source_path }}/"
         dest: "{{ web_dest_path }}/"
@@ -53,7 +76,7 @@
           - "--exclude=README.md"
       delegate_to: localhost
 
-    - name: Set proper ownership on website files 
+    - name: Set proper ownership on website files
       ansible.builtin.file:
         path: "{{ web_dest_path }}"
         owner: "{{ web_user }}"
@@ -61,32 +84,34 @@
         recurse: yes
         mode: '0755'
 
-    - name: Set proper permissions on files       
+    - name: Set proper permissions on files and directories
       ansible.builtin.shell: |
         find {{ web_dest_path }} -type f -exec chmod 0644 {} \;
         find {{ web_dest_path }} -type d -exec chmod 0755 {} \;
+      args:
+        chdir: "{{ web_dest_path }}"
 
-    - name: Validate Apache configuration        
+    - name: Validate Apache configuration
       ansible.builtin.command: apache2ctl configtest
       register: apache_config_test
       changed_when: false
       failed_when: false
 
-    - name: Restart Apache service                
+    - name: Restart Apache service
       ansible.builtin.service:
         name: apache2
         state: restarted
-      when: apache_config_test.rc == 0            
+      when: apache_config_test.rc == 0
 
-    - name: Wait for Apache to be ready           
+    - name: Wait for Apache to be ready
       ansible.builtin.wait_for:
         port: 80
         delay: 2
         timeout: 30
 
-    - name: Display deployment information        
+    - name: Display deployment information
       ansible.builtin.debug:
-        msg: 
+        msg:
           - "Deployment completed successfully!"
           - "Website URL: http://{{ ansible_host }}"
           - "Document Root: {{ web_dest_path }}"
