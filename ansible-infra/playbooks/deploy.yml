@@ -5,11 +5,17 @@
   gather_facts: yes
 
   vars:
-    # Path relative to Jenkinsfile workspace
+    # Path relative to this playbook (adjust if your repo layout differs)
     web_source_path: "{{ playbook_dir }}/../../web-app"
     web_dest_path: "/var/www/html"
     web_user: "www-data"
     web_group: "www-data"
+
+  pre_tasks:
+    - name: Ensure rsync is installed on remote (required by synchronize)
+      ansible.builtin.package:
+        name: rsync
+        state: present
 
   tasks:
     - name: Ensure Apache is installed
@@ -26,8 +32,6 @@
         state: started
       tags: ['setup']
 
-    # ---------- Backup (fixed) ----------
-    # Find existing content explicitly, then archive that list only if it exists.
     - name: Find existing website files (any type)
       ansible.builtin.find:
         paths: "{{ web_dest_path }}"
@@ -43,11 +47,7 @@
         dest: "/tmp/website_backup_{{ ansible_facts.date_time.epoch }}.tar.gz"
         format: gz
       tags: ['backup']
-    # ---------- /Backup ----------
 
-    # ---------- Cleanup (idempotent) ----------
-    # Option A: Remove everything, then recreate the directory (safest and simplest)
-    - name: Remove website directory completely
       ansible.builtin.file:
         path: "{{ web_dest_path }}"
         state: absent
@@ -61,10 +61,10 @@
         group: "{{ web_group }}"
         mode: '0755'
       tags: ['cleanup']
-    # If you must keep the default Apache index.html, use find+file instead of the two tasks above.
-    # ---------- /Cleanup ----------
-
+ 
     - name: Copy website files from web-app repository
+      become: false               
+      delegate_to: localhost
       ansible.builtin.synchronize:
         src: "{{ web_source_path }}/"
         dest: "{{ web_dest_path }}/"
@@ -74,7 +74,7 @@
           - "--exclude=.git"
           - "--exclude=.gitignore"
           - "--exclude=README.md"
-      delegate_to: localhost
+
 
     - name: Set proper ownership on website files
       ansible.builtin.file:
