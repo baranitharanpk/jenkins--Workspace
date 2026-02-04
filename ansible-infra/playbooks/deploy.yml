@@ -5,14 +5,20 @@
   gather_facts: yes
 
   vars:
-    # Path relative to this playbook (adjust if your repo layout differs)
-    web_source_path: "{{ playbook_dir }}/../../web-app"
+    # CORRECT PATH for your actual repository structure:
+    # workspace/web-app/ (webapp repository: index.html, script.js, style.css)
+    # workspace/repo/ansible-infra/playbooks/ (this file)
+    # 
+    # From playbooks/deploy.yml to web-app:
+    # playbooks -> ansible-infra -> repo -> workspace -> web-app
+    # That's 3 levels up (../..), then web-app
+    web_source_path: "{{ playbook_dir }}/../../../web-app"
     web_dest_path: "/var/www/html"
     web_user: "www-data"
     web_group: "www-data"
 
   pre_tasks:
-    - name: Ensure rsync is installed on remote (required by synchronize)
+    - name: Ensure rsync is installed on remote
       ansible.builtin.package:
         name: rsync
         state: present
@@ -33,8 +39,89 @@
         state: started
       tags: ['setup']
 
-    # ---------- Backup ----------
-    - name: Find existing website files (any type)
+    # ========== DEBUG & VERIFICATION ==========
+    - name: Debug - Show repository and path information
+      ansible.builtin.debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "📁 PATH INFORMATION"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "Playbook directory: {{ playbook_dir }}"
+          - "Web source path: {{ web_source_path }}"
+          - "Web destination: {{ web_dest_path }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      tags: ['debug', 'deploy']
+
+    - name: Verify web-app directory exists on Jenkins controller
+      delegate_to: localhost
+      become: false
+      ansible.builtin.stat:
+        path: "{{ web_source_path }}"
+      register: web_app_dir
+      tags: ['deploy']
+
+    - name: Show directory verification result
+      ansible.builtin.debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "🔍 DIRECTORY CHECK"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "Checking path: {{ web_source_path }}"
+          - "Directory exists: {{ web_app_dir.stat.exists }}"
+          - "Is directory: {{ web_app_dir.stat.isdir | default(false) }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      tags: ['deploy']
+
+    - name: List files in web-app directory (for verification)
+      delegate_to: localhost
+      become: false
+      ansible.builtin.command: ls -la {{ web_source_path }}
+      register: webapp_files
+      when: web_app_dir.stat.exists
+      changed_when: false
+      tags: ['debug', 'deploy']
+
+    - name: Show web-app repository files
+      ansible.builtin.debug:
+        msg: "{{ webapp_files.stdout_lines }}"
+      when: web_app_dir.stat.exists
+      tags: ['debug', 'deploy']
+
+    - name: Fail if web-app directory not found
+      ansible.builtin.fail:
+        msg: |
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          ❌ ERROR: Web app source directory not found!
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          
+          Expected location: {{ web_source_path }}
+          
+          Your directory structure should be:
+          
+          Jenkins Workspace/
+          ├── web-app/              ← webapp repository (index.html, script.js, style.css)
+          │   ├── index.html
+          │   ├── script.js
+          │   └── style.css
+          └── repo/                 ← jenkins--Workspace repository
+              └── ansible-infra/
+                  ├── inventory/
+                  │   └── hosts.ini
+                  └── playbooks/
+                      └── deploy.yml (this file)
+          
+          TROUBLESHOOTING:
+          1. Check your Jenkinsfile has: dir('repo') { git ... }
+          2. Verify both repositories were cloned successfully
+          3. Check the "Verify File Structure" stage output in Jenkins
+          
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      when: not web_app_dir.stat.exists or not web_app_dir.stat.isdir
+      tags: ['deploy']
+    # ========== /DEBUG & VERIFICATION ==========
+
+    # ========== BACKUP ==========
+    - name: Find existing website files
       ansible.builtin.find:
         paths: "{{ web_dest_path }}"
         file_type: any
@@ -43,7 +130,7 @@
       ignore_errors: yes
       tags: ['backup']
 
-    - name: Create backup ONLY if files exist
+    - name: Create backup if files exist
       when: web_files.matched | int > 0
       ansible.builtin.archive:
         path: "{{ web_files.files | map(attribute='path') | list }}"
@@ -51,9 +138,15 @@
         format: gz
       ignore_errors: yes
       tags: ['backup']
-    # ---------- /Backup ----------
 
-    # ---------- Cleanup ----------
+    - name: Show backup information
+      when: web_files.matched | int > 0
+      ansible.builtin.debug:
+        msg: "✅ Backup created at /tmp/website_backup_{{ ansible_facts.date_time.epoch }}.tar.gz"
+      tags: ['backup']
+    # ========== /BACKUP ==========
+
+    # ========== CLEANUP ==========
     - name: Remove website directory completely
       ansible.builtin.file:
         path: "{{ web_dest_path }}"
@@ -68,11 +161,10 @@
         group: "{{ web_group }}"
         mode: '0755'
       tags: ['cleanup']
-    # ---------- /Cleanup ----------
+    # ========== /CLEANUP ==========
 
-    # ---------- Content Copy (FIXED) ----------
-    # OPTION 1: Use copy module instead of synchronize (more reliable)
-    - name: Copy website files from web-app repository
+    # ========== CONTENT DEPLOYMENT ==========
+    - name: Copy website files from webapp repository to web server
       ansible.builtin.copy:
         src: "{{ web_source_path }}/"
         dest: "{{ web_dest_path }}/"
@@ -81,8 +173,22 @@
         mode: preserve
         remote_src: no
       tags: ['deploy']
-    # ---------- /Content Copy ----------
+      register: copy_result
 
+    - name: Show deployment result
+      ansible.builtin.debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "📦 FILES COPIED"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "Source: {{ web_source_path }}"
+          - "Destination: {{ web_dest_path }}"
+          - "Changed: {{ copy_result.changed }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      tags: ['deploy']
+    # ========== /CONTENT DEPLOYMENT ==========
+
+    # ========== PERMISSIONS ==========
     - name: Set proper ownership on website files
       ansible.builtin.file:
         path: "{{ web_dest_path }}"
@@ -100,11 +206,31 @@
         chdir: "{{ web_dest_path }}"
       tags: ['permissions']
 
+    - name: Verify deployed files
+      ansible.builtin.command: ls -la {{ web_dest_path }}
+      register: deployed_files
+      changed_when: false
+      tags: ['verify']
+
+    - name: Show deployed files
+      ansible.builtin.debug:
+        msg: "{{ deployed_files.stdout_lines }}"
+      tags: ['verify']
+    # ========== /PERMISSIONS ==========
+
+    # ========== APACHE CONFIGURATION ==========
     - name: Validate Apache configuration
       ansible.builtin.command: apache2ctl configtest
       register: apache_config_test
       changed_when: false
       failed_when: false
+      tags: ['verify']
+
+    - name: Show Apache config test result
+      ansible.builtin.debug:
+        msg:
+          - "Apache config test: {{ 'PASSED' if apache_config_test.rc == 0 else 'FAILED' }}"
+          - "{{ apache_config_test.stderr if apache_config_test.rc != 0 else 'Configuration is valid' }}"
       tags: ['verify']
 
     - name: Restart Apache service
@@ -121,10 +247,46 @@
         timeout: 30
       tags: ['verify']
 
-    - name: Display deployment information
+    - name: Test website accessibility
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}"
+        method: GET
+        return_content: yes
+      register: website_test
+      tags: ['verify']
+
+    - name: Show website content preview
       ansible.builtin.debug:
         msg:
-          - "Deployment completed successfully!"
-          - "Website URL: http://{{ ansible_host }}"
-          - "Document Root: {{ web_dest_path }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "🌐 WEBSITE TEST"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "URL: http://{{ ansible_host }}"
+          - "Status: {{ website_test.status }}"
+          - "Content preview (first 500 chars):"
+          - "{{ website_test.content[:500] }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      tags: ['verify']
+    # ========== /APACHE CONFIGURATION ==========
+
+    # ========== DEPLOYMENT SUMMARY ==========
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - "✅ DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - ""
+          - "🌐 Website URL: http://{{ ansible_host }}"
+          - "📁 Document Root: {{ web_dest_path }}"
+          - "📦 Source Repository: webapp (index.html, script.js, style.css)"
+          - "🔧 Deployed Files:"
+          - "   - index.html"
+          - "   - script.js"
+          - "   - style.css"
+          - ""
+          - "🎉 Your web application is now live!"
+          - ""
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       tags: ['info']
+    # ========== /DEPLOYMENT SUMMARY ==========
